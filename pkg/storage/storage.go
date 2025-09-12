@@ -73,8 +73,9 @@ func (s *LocalStorage) SaveBackup(ctx context.Context, metadata *types.BackupMet
 		}
 
 		// Update resource info and manifest first
-		resource.Info.RelativePath = relativePath
-		manifest.Resources[i] = resource.Info
+		resourceInfo := resource.Info
+		resourceInfo.RelativePath = relativePath
+		manifest.Resources[i] = resourceInfo
 		totalSize += int64(len(resource.Content))
 
 		// Check context cancellation before I/O
