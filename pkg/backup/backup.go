@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/yaml"
 
 	"k8s-backup/pkg/k8s"
@@ -371,6 +372,16 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 	// Clean up the object for backup (remove runtime fields)
 	m.cleanObject(obj)
 
+	// Get the proper apiVersion for this kind
+	apiVersion := m.getAPIVersionForKind(kind)
+
+	// Set the ObjectKind properly (client-go objects don't have this populated by default)
+	obj.GetObjectKind().SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   m.getGroupForKind(kind),
+		Version: m.getVersionForKind(kind),
+		Kind:    kind,
+	})
+
 	// Convert to YAML
 	content, err := yaml.Marshal(obj)
 	if err != nil {
@@ -384,7 +395,7 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 	}
 
 	info := types.ResourceInfo{
-		APIVersion:  obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+		APIVersion:  apiVersion,
 		Kind:        kind,
 		Namespace:   namespace,
 		Name:        metaObj.GetName(),
@@ -397,6 +408,74 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 		Content: content,
 		Info:    info,
 	}, nil
+}
+
+// getAPIVersionForKind returns the proper API version for a given resource kind
+func (m *Manager) getAPIVersionForKind(kind string) string {
+	switch kind {
+	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
+		return "v1"
+	case "Deployment", "StatefulSet", "DaemonSet":
+		return "apps/v1"
+	case "Job":
+		return "batch/v1"
+	case "CronJob":
+		return "batch/v1"
+	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
+		return "rbac.authorization.k8s.io/v1"
+	case "Ingress", "NetworkPolicy":
+		return "networking.k8s.io/v1"
+	case "StorageClass":
+		return "storage.k8s.io/v1"
+	case "PodDisruptionBudget":
+		return "policy/v1"
+	default:
+		return "v1"
+	}
+}
+
+// getGroupForKind returns the API group for a given resource kind
+func (m *Manager) getGroupForKind(kind string) string {
+	switch kind {
+	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
+		return ""
+	case "Deployment", "StatefulSet", "DaemonSet":
+		return "apps"
+	case "Job", "CronJob":
+		return "batch"
+	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
+		return "rbac.authorization.k8s.io"
+	case "Ingress", "NetworkPolicy":
+		return "networking.k8s.io"
+	case "StorageClass":
+		return "storage.k8s.io"
+	case "PodDisruptionBudget":
+		return "policy"
+	default:
+		return ""
+	}
+}
+
+// getVersionForKind returns the API version (without group) for a given resource kind
+func (m *Manager) getVersionForKind(kind string) string {
+	switch kind {
+	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
+		return "v1"
+	case "Deployment", "StatefulSet", "DaemonSet":
+		return "v1"
+	case "Job", "CronJob":
+		return "v1"
+	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
+		return "v1"
+	case "Ingress", "NetworkPolicy":
+		return "v1"
+	case "StorageClass":
+		return "v1"
+	case "PodDisruptionBudget":
+		return "v1"
+	default:
+		return "v1"
+	}
 }
 
 // cleanObject removes runtime fields that shouldn't be included in backups

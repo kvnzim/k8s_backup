@@ -14,6 +14,8 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	coreapplyv1 "k8s.io/client-go/applyconfigurations/core/v1"
+	metaapplyv1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -140,7 +142,162 @@ func (c *Client) GetPodDisruptionBudgets(ctx context.Context, namespace string) 
 	return c.clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
 }
 
-// IMPORTANT: ApplyResource not implemented - this is a backup-only tool
+// ApplyResource applies a Kubernetes resource to the cluster
 func (c *Client) ApplyResource(ctx context.Context, obj runtime.Object, namespace string, dryRun bool) error {
-	return fmt.Errorf("ApplyResource not implemented - this tool is for backup only")
+	// Get the object metadata to determine resource type
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	kind := gvk.Kind
+
+	// Create apply options
+	applyOpts := metav1.ApplyOptions{
+		FieldManager: "k8s-backup-restore",
+		Force:        true,
+	}
+	if dryRun {
+		applyOpts.DryRun = []string{metav1.DryRunAll}
+	}
+
+	// Handle different resource types
+	switch kind {
+	case "Namespace":
+		ns := obj.(*corev1.Namespace)
+		if dryRun {
+			_, err := c.clientset.CoreV1().Namespaces().Get(ctx, ns.Name, metav1.GetOptions{})
+			if err != nil {
+				// Would create
+				return nil
+			}
+			// Would update
+			return nil
+		}
+		_, err := c.clientset.CoreV1().Namespaces().Apply(ctx, &coreapplyv1.NamespaceApplyConfiguration{
+			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
+				APIVersion: &ns.APIVersion,
+				Kind:       &ns.Kind,
+			},
+			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
+				Name:        &ns.Name,
+				Labels:      ns.Labels,
+				Annotations: ns.Annotations,
+			},
+		}, applyOpts)
+		return err
+
+	case "ConfigMap":
+		cm := obj.(*corev1.ConfigMap)
+		if dryRun {
+			_, err := c.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, cm.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil
+			}
+			return nil
+		}
+		_, err := c.clientset.CoreV1().ConfigMaps(namespace).Apply(ctx, &coreapplyv1.ConfigMapApplyConfiguration{
+			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
+				APIVersion: &cm.APIVersion,
+				Kind:       &cm.Kind,
+			},
+			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
+				Name:        &cm.Name,
+				Namespace:   &namespace,
+				Labels:      cm.Labels,
+				Annotations: cm.Annotations,
+			},
+			Data:       cm.Data,
+			BinaryData: cm.BinaryData,
+		}, applyOpts)
+		return err
+
+	case "Secret":
+		secret := obj.(*corev1.Secret)
+		if dryRun {
+			_, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, secret.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil
+			}
+			return nil
+		}
+		_, err := c.clientset.CoreV1().Secrets(namespace).Apply(ctx, &coreapplyv1.SecretApplyConfiguration{
+			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
+				APIVersion: &secret.APIVersion,
+				Kind:       &secret.Kind,
+			},
+			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
+				Name:        &secret.Name,
+				Namespace:   &namespace,
+				Labels:      secret.Labels,
+				Annotations: secret.Annotations,
+			},
+			Data: secret.Data,
+			Type: &secret.Type,
+		}, applyOpts)
+		return err
+
+	case "Service":
+		svc := obj.(*corev1.Service)
+		if dryRun {
+			_, err := c.clientset.CoreV1().Services(namespace).Get(ctx, svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil
+			}
+			return nil
+		}
+
+		// Convert ports
+		var ports []coreapplyv1.ServicePortApplyConfiguration
+		for _, port := range svc.Spec.Ports {
+			portConfig := coreapplyv1.ServicePortApplyConfiguration{
+				Name:       &port.Name,
+				Protocol:   &port.Protocol,
+				Port:       &port.Port,
+				TargetPort: &port.TargetPort,
+			}
+			if port.NodePort != 0 {
+				portConfig.NodePort = &port.NodePort
+			}
+			ports = append(ports, portConfig)
+		}
+
+		_, err := c.clientset.CoreV1().Services(namespace).Apply(ctx, &coreapplyv1.ServiceApplyConfiguration{
+			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
+				APIVersion: &svc.APIVersion,
+				Kind:       &svc.Kind,
+			},
+			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
+				Name:        &svc.Name,
+				Namespace:   &namespace,
+				Labels:      svc.Labels,
+				Annotations: svc.Annotations,
+			},
+			Spec: &coreapplyv1.ServiceSpecApplyConfiguration{
+				Selector: svc.Spec.Selector,
+				Type:     &svc.Spec.Type,
+				Ports:    ports,
+			},
+		}, applyOpts)
+		return err
+
+	case "Deployment":
+		deployment := obj.(*appsv1.Deployment)
+		if dryRun {
+			_, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil
+			}
+			return nil
+		}
+
+		// Create a simplified deployment apply configuration
+		// This is a complex conversion, so for now we'll use a basic approach
+		_, err := c.clientset.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
+		if err != nil {
+			// If it exists, try to update
+			_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+		}
+		return err
+
+	default:
+		// For unsupported types, use a generic approach
+		return fmt.Errorf("resource type %s not yet supported for restore", kind)
+	}
 }
