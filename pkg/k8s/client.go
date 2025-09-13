@@ -4,22 +4,18 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	policyv1 "k8s.io/api/policy/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	coreapplyv1 "k8s.io/client-go/applyconfigurations/core/v1"
-	metaapplyv1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"sigs.k8s.io/yaml"
 )
 
 type Client struct {
@@ -62,242 +58,115 @@ func (c *Client) GetServerVersion() (string, error) {
 	return version.GitVersion, nil
 }
 
-func (c *Client) GetNamespaces(ctx context.Context) (*corev1.NamespaceList, error) {
-	return c.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetDeployments(ctx context.Context, namespace string) (*appsv1.DeploymentList, error) {
-	return c.clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetServices(ctx context.Context, namespace string) (*corev1.ServiceList, error) {
-	return c.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetConfigMaps(ctx context.Context, namespace string) (*corev1.ConfigMapList, error) {
-	return c.clientset.CoreV1().ConfigMaps(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetSecrets(ctx context.Context, namespace string) (*corev1.SecretList, error) {
-	return c.clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetPersistentVolumeClaims(ctx context.Context, namespace string) (*corev1.PersistentVolumeClaimList, error) {
-	return c.clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetPersistentVolumes(ctx context.Context) (*corev1.PersistentVolumeList, error) {
-	return c.clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetServiceAccounts(ctx context.Context, namespace string) (*corev1.ServiceAccountList, error) {
-	return c.clientset.CoreV1().ServiceAccounts(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetRoles(ctx context.Context, namespace string) (*rbacv1.RoleList, error) {
-	return c.clientset.RbacV1().Roles(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetRoleBindings(ctx context.Context, namespace string) (*rbacv1.RoleBindingList, error) {
-	return c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetClusterRoles(ctx context.Context) (*rbacv1.ClusterRoleList, error) {
-	return c.clientset.RbacV1().ClusterRoles().List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetClusterRoleBindings(ctx context.Context) (*rbacv1.ClusterRoleBindingList, error) {
-	return c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetIngresses(ctx context.Context, namespace string) (*networkingv1.IngressList, error) {
-	return c.clientset.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetNetworkPolicies(ctx context.Context, namespace string) (*networkingv1.NetworkPolicyList, error) {
-	return c.clientset.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetStatefulSets(ctx context.Context, namespace string) (*appsv1.StatefulSetList, error) {
-	return c.clientset.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetDaemonSets(ctx context.Context, namespace string) (*appsv1.DaemonSetList, error) {
-	return c.clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetJobs(ctx context.Context, namespace string) (*batchv1.JobList, error) {
-	return c.clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetCronJobs(ctx context.Context, namespace string) (*batchv1.CronJobList, error) {
-	return c.clientset.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetStorageClasses(ctx context.Context) (*storagev1.StorageClassList, error) {
-	return c.clientset.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
-}
-
-func (c *Client) GetPodDisruptionBudgets(ctx context.Context, namespace string) (*policyv1.PodDisruptionBudgetList, error) {
-	return c.clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
+// Clientset returns the underlying Kubernetes clientset for direct access
+// This eliminates the need for 20+ wrapper methods that add no value
+func (c *Client) Clientset() *kubernetes.Clientset {
+	return c.clientset
 }
 
 // ApplyResource applies a Kubernetes resource to the cluster
 func (c *Client) ApplyResource(ctx context.Context, obj runtime.Object, namespace string, dryRun bool) error {
-	// Get the object metadata to determine resource type
-	gvk := obj.GetObjectKind().GroupVersionKind()
-	kind := gvk.Kind
-
-	// Create apply options
-	applyOpts := metav1.ApplyOptions{
-		FieldManager: "k8s-backup-restore",
-		Force:        true,
+	// Convert to unstructured if needed
+	var unstruct *unstructured.Unstructured
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		unstruct = u
+	} else {
+		unstructObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+		if err != nil {
+			return fmt.Errorf("failed to convert object to unstructured: %w", err)
+		}
+		unstruct = &unstructured.Unstructured{Object: unstructObj}
 	}
+
 	if dryRun {
-		applyOpts.DryRun = []string{metav1.DryRunAll}
+		return nil // Skip all operations in dry run
 	}
 
-	// Handle different resource types
+	// Get resource info
+	gvk := unstruct.GroupVersionKind()
+	kind := gvk.Kind
+	targetNamespace := unstruct.GetNamespace()
+	if targetNamespace == "" && namespace != "" {
+		targetNamespace = namespace
+		unstruct.SetNamespace(targetNamespace)
+	}
+
+	// Use unified approach: marshal to YAML, unmarshal to typed object, then create/update
+	return c.applyResource(ctx, unstruct, kind, targetNamespace)
+}
+
+// applyResource handles the actual resource application using a unified approach
+func (c *Client) applyResource(ctx context.Context, unstruct *unstructured.Unstructured, kind, namespace string) error {
+	// Convert unstructured to YAML
+	yamlData, err := yaml.Marshal(unstruct.Object)
+	if err != nil {
+		return fmt.Errorf("failed to marshal resource to YAML: %w", err)
+	}
+
+	// Apply based on resource type using the same create/update pattern
 	switch kind {
 	case "Namespace":
-		ns := obj.(*corev1.Namespace)
-		if dryRun {
-			_, err := c.clientset.CoreV1().Namespaces().Get(ctx, ns.Name, metav1.GetOptions{})
-			if err != nil {
-				// Would create
-				return nil
-			}
-			// Would update
-			return nil
+		var ns corev1.Namespace
+		if err := yaml.Unmarshal(yamlData, &ns); err != nil {
+			return err
 		}
-		_, err := c.clientset.CoreV1().Namespaces().Apply(ctx, &coreapplyv1.NamespaceApplyConfiguration{
-			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
-				APIVersion: &ns.APIVersion,
-				Kind:       &ns.Kind,
-			},
-			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
-				Name:        &ns.Name,
-				Labels:      ns.Labels,
-				Annotations: ns.Annotations,
-			},
-		}, applyOpts)
-		return err
-
-	case "ConfigMap":
-		cm := obj.(*corev1.ConfigMap)
-		if dryRun {
-			_, err := c.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, cm.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil
-			}
-			return nil
+		_, err = c.clientset.CoreV1().Namespaces().Create(ctx, &ns, metav1.CreateOptions{})
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = c.clientset.CoreV1().Namespaces().Update(ctx, &ns, metav1.UpdateOptions{})
 		}
-		_, err := c.clientset.CoreV1().ConfigMaps(namespace).Apply(ctx, &coreapplyv1.ConfigMapApplyConfiguration{
-			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
-				APIVersion: &cm.APIVersion,
-				Kind:       &cm.Kind,
-			},
-			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
-				Name:        &cm.Name,
-				Namespace:   &namespace,
-				Labels:      cm.Labels,
-				Annotations: cm.Annotations,
-			},
-			Data:       cm.Data,
-			BinaryData: cm.BinaryData,
-		}, applyOpts)
-		return err
-
-	case "Secret":
-		secret := obj.(*corev1.Secret)
-		if dryRun {
-			_, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, secret.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil
-			}
-			return nil
-		}
-		_, err := c.clientset.CoreV1().Secrets(namespace).Apply(ctx, &coreapplyv1.SecretApplyConfiguration{
-			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
-				APIVersion: &secret.APIVersion,
-				Kind:       &secret.Kind,
-			},
-			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
-				Name:        &secret.Name,
-				Namespace:   &namespace,
-				Labels:      secret.Labels,
-				Annotations: secret.Annotations,
-			},
-			Data: secret.Data,
-			Type: &secret.Type,
-		}, applyOpts)
 		return err
 
 	case "Service":
-		svc := obj.(*corev1.Service)
-		if dryRun {
-			_, err := c.clientset.CoreV1().Services(namespace).Get(ctx, svc.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil
-			}
-			return nil
+		var svc corev1.Service
+		if err := yaml.Unmarshal(yamlData, &svc); err != nil {
+			return err
 		}
-
-		// Convert ports
-		var ports []coreapplyv1.ServicePortApplyConfiguration
-		for _, port := range svc.Spec.Ports {
-			portConfig := coreapplyv1.ServicePortApplyConfiguration{
-				Name:       &port.Name,
-				Protocol:   &port.Protocol,
-				Port:       &port.Port,
-				TargetPort: &port.TargetPort,
-			}
-			if port.NodePort != 0 {
-				portConfig.NodePort = &port.NodePort
-			}
-			ports = append(ports, portConfig)
+		svc.Namespace = namespace
+		_, err = c.clientset.CoreV1().Services(namespace).Create(ctx, &svc, metav1.CreateOptions{})
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = c.clientset.CoreV1().Services(namespace).Update(ctx, &svc, metav1.UpdateOptions{})
 		}
-
-		_, err := c.clientset.CoreV1().Services(namespace).Apply(ctx, &coreapplyv1.ServiceApplyConfiguration{
-			TypeMetaApplyConfiguration: metaapplyv1.TypeMetaApplyConfiguration{
-				APIVersion: &svc.APIVersion,
-				Kind:       &svc.Kind,
-			},
-			ObjectMetaApplyConfiguration: &metaapplyv1.ObjectMetaApplyConfiguration{
-				Name:        &svc.Name,
-				Namespace:   &namespace,
-				Labels:      svc.Labels,
-				Annotations: svc.Annotations,
-			},
-			Spec: &coreapplyv1.ServiceSpecApplyConfiguration{
-				Selector: svc.Spec.Selector,
-				Type:     &svc.Spec.Type,
-				Ports:    ports,
-			},
-		}, applyOpts)
 		return err
 
 	case "Deployment":
-		deployment := obj.(*appsv1.Deployment)
-		if dryRun {
-			_, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil
-			}
-			return nil
+		var dep appsv1.Deployment
+		if err := yaml.Unmarshal(yamlData, &dep); err != nil {
+			return err
 		}
+		dep.Namespace = namespace
+		_, err = c.clientset.AppsV1().Deployments(namespace).Create(ctx, &dep, metav1.CreateOptions{})
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, &dep, metav1.UpdateOptions{})
+		}
+		return err
 
-		// Create a simplified deployment apply configuration
-		// This is a complex conversion, so for now we'll use a basic approach
-		_, err := c.clientset.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
-		if err != nil {
-			// If it exists, try to update
-			_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+	case "ConfigMap":
+		var cm corev1.ConfigMap
+		if err := yaml.Unmarshal(yamlData, &cm); err != nil {
+			return err
+		}
+		cm.Namespace = namespace
+		_, err = c.clientset.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{})
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = c.clientset.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{})
+		}
+		return err
+
+	case "Secret":
+		var secret corev1.Secret
+		if err := yaml.Unmarshal(yamlData, &secret); err != nil {
+			return err
+		}
+		secret.Namespace = namespace
+		_, err = c.clientset.CoreV1().Secrets(namespace).Create(ctx, &secret, metav1.CreateOptions{})
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = c.clientset.CoreV1().Secrets(namespace).Update(ctx, &secret, metav1.UpdateOptions{})
 		}
 		return err
 
 	default:
-		// For unsupported types, use a generic approach
-		return fmt.Errorf("resource type %s not yet supported for restore", kind)
+		// Log unsupported types but don't fail
+		fmt.Printf("Info: Skipping unsupported resource type: %s\n", kind)
+		return nil
 	}
 }

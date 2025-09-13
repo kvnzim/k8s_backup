@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -213,7 +216,7 @@ func (m *Manager) estimateResourceCount(namespaceCount int, resourceTypes []stri
 // getNamespacesToBackup determines which namespaces to include in the backup
 func (m *Manager) getNamespacesToBackup(ctx context.Context, options *types.BackupOptions) ([]string, error) {
 	// Get all namespaces
-	allNamespaces, err := m.k8sClient.GetNamespaces(ctx)
+	allNamespaces, err := m.k8sClient.Clientset().CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -372,13 +375,13 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 	// Clean up the object for backup (remove runtime fields)
 	m.cleanObject(obj)
 
-	// Get the proper apiVersion for this kind
-	apiVersion := m.getAPIVersionForKind(kind)
+	// Get API info for this kind
+	apiInfo := m.getAPIInfo(kind)
 
 	// Set the ObjectKind properly (client-go objects don't have this populated by default)
 	obj.GetObjectKind().SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   m.getGroupForKind(kind),
-		Version: m.getVersionForKind(kind),
+		Group:   apiInfo.Group,
+		Version: apiInfo.Version,
 		Kind:    kind,
 	})
 
@@ -395,7 +398,7 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 	}
 
 	info := types.ResourceInfo{
-		APIVersion:  apiVersion,
+		APIVersion:  apiInfo.APIVersion,
 		Kind:        kind,
 		Namespace:   namespace,
 		Name:        metaObj.GetName(),
@@ -410,72 +413,58 @@ func (m *Manager) convertToResourceWithContent(obj runtime.Object, namespace, ki
 	}, nil
 }
 
-// getAPIVersionForKind returns the proper API version for a given resource kind
-func (m *Manager) getAPIVersionForKind(kind string) string {
-	switch kind {
-	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
-		return "v1"
-	case "Deployment", "StatefulSet", "DaemonSet":
-		return "apps/v1"
-	case "Job":
-		return "batch/v1"
-	case "CronJob":
-		return "batch/v1"
-	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
-		return "rbac.authorization.k8s.io/v1"
-	case "Ingress", "NetworkPolicy":
-		return "networking.k8s.io/v1"
-	case "StorageClass":
-		return "storage.k8s.io/v1"
-	case "PodDisruptionBudget":
-		return "policy/v1"
-	default:
-		return "v1"
-	}
+// APIInfo holds API version information for different resource types
+type APIInfo struct {
+	Group      string
+	Version    string
+	APIVersion string
 }
 
-// getGroupForKind returns the API group for a given resource kind
-func (m *Manager) getGroupForKind(kind string) string {
-	switch kind {
-	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
-		return ""
-	case "Deployment", "StatefulSet", "DaemonSet":
-		return "apps"
-	case "Job", "CronJob":
-		return "batch"
-	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
-		return "rbac.authorization.k8s.io"
-	case "Ingress", "NetworkPolicy":
-		return "networking.k8s.io"
-	case "StorageClass":
-		return "storage.k8s.io"
-	case "PodDisruptionBudget":
-		return "policy"
-	default:
-		return ""
-	}
-}
+// getAPIInfo returns API information for a given resource kind
+func (m *Manager) getAPIInfo(kind string) APIInfo {
+	// Define the mapping once, eliminating duplicate switch cases
+	resourceMap := map[string]APIInfo{
+		// Core resources (no group)
+		"Namespace":             {Group: "", Version: "v1", APIVersion: "v1"},
+		"Service":               {Group: "", Version: "v1", APIVersion: "v1"},
+		"ConfigMap":             {Group: "", Version: "v1", APIVersion: "v1"},
+		"Secret":                {Group: "", Version: "v1", APIVersion: "v1"},
+		"PersistentVolumeClaim": {Group: "", Version: "v1", APIVersion: "v1"},
+		"PersistentVolume":      {Group: "", Version: "v1", APIVersion: "v1"},
+		"ServiceAccount":        {Group: "", Version: "v1", APIVersion: "v1"},
 
-// getVersionForKind returns the API version (without group) for a given resource kind
-func (m *Manager) getVersionForKind(kind string) string {
-	switch kind {
-	case "Namespace", "Service", "ConfigMap", "Secret", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount":
-		return "v1"
-	case "Deployment", "StatefulSet", "DaemonSet":
-		return "v1"
-	case "Job", "CronJob":
-		return "v1"
-	case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
-		return "v1"
-	case "Ingress", "NetworkPolicy":
-		return "v1"
-	case "StorageClass":
-		return "v1"
-	case "PodDisruptionBudget":
-		return "v1"
-	default:
-		return "v1"
+		// Apps group
+		"Deployment":  {Group: "apps", Version: "v1", APIVersion: "apps/v1"},
+		"StatefulSet": {Group: "apps", Version: "v1", APIVersion: "apps/v1"},
+		"DaemonSet":   {Group: "apps", Version: "v1", APIVersion: "apps/v1"},
+
+		// Batch group
+		"Job":     {Group: "batch", Version: "v1", APIVersion: "batch/v1"},
+		"CronJob": {Group: "batch", Version: "v1", APIVersion: "batch/v1"},
+
+		// RBAC group
+		"Role":               {Group: "rbac.authorization.k8s.io", Version: "v1", APIVersion: "rbac.authorization.k8s.io/v1"},
+		"RoleBinding":        {Group: "rbac.authorization.k8s.io", Version: "v1", APIVersion: "rbac.authorization.k8s.io/v1"},
+		"ClusterRole":        {Group: "rbac.authorization.k8s.io", Version: "v1", APIVersion: "rbac.authorization.k8s.io/v1"},
+		"ClusterRoleBinding": {Group: "rbac.authorization.k8s.io", Version: "v1", APIVersion: "rbac.authorization.k8s.io/v1"},
+
+		// Networking group
+		"Ingress":       {Group: "networking.k8s.io", Version: "v1", APIVersion: "networking.k8s.io/v1"},
+		"NetworkPolicy": {Group: "networking.k8s.io", Version: "v1", APIVersion: "networking.k8s.io/v1"},
+
+		// Storage group
+		"StorageClass": {Group: "storage.k8s.io", Version: "v1", APIVersion: "storage.k8s.io/v1"},
+
+		// Policy group
+		"PodDisruptionBudget": {Group: "policy", Version: "v1", APIVersion: "policy/v1"},
 	}
+
+	if info, exists := resourceMap[kind]; exists {
+		return info
+	}
+
+	// Default to core/v1 for unknown resources
+	return APIInfo{Group: "", Version: "v1", APIVersion: "v1"}
 }
 
 // cleanObject removes runtime fields that shouldn't be included in backups
@@ -512,18 +501,31 @@ func (m *Manager) cleanObject(obj runtime.Object) {
 	}
 }
 
-// Individual resource backup functions
-func (m *Manager) backupNamespaces(ctx context.Context) ([]types.ResourceWithContent, error) {
-	namespaces, err := m.k8sClient.GetNamespaces(ctx)
+// Generic backup function - eliminates 300+ lines of repetitive code
+func (m *Manager) backupResources(ctx context.Context, namespace, kind string, listFunc func() (interface{}, error), shouldSkip func(interface{}) bool) ([]types.ResourceWithContent, error) {
+	result, err := listFunc()
 	if err != nil {
 		return nil, err
 	}
 
-	var resources []types.ResourceWithContent
-	for _, ns := range namespaces.Items {
-		resource, err := m.convertToResourceWithContent(&ns, "", "Namespace")
+	// Use reflection to handle different list types
+	items := reflect.ValueOf(result).Elem().FieldByName("Items")
+	if !items.IsValid() {
+		return nil, fmt.Errorf("invalid list result for %s", kind)
+	}
+
+	resources := make([]types.ResourceWithContent, 0, items.Len())
+	for i := 0; i < items.Len(); i++ {
+		item := items.Index(i).Addr().Interface().(runtime.Object)
+
+		// Apply skip logic if provided
+		if shouldSkip != nil && shouldSkip(item) {
+			continue
+		}
+
+		resource, err := m.convertToResourceWithContent(item, namespace, kind)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to convert %s: %w", kind, err)
 		}
 		resources = append(resources, resource)
 	}
@@ -531,364 +533,169 @@ func (m *Manager) backupNamespaces(ctx context.Context) ([]types.ResourceWithCon
 	return resources, nil
 }
 
+// Namespace backup function (cluster-scoped)
+func (m *Manager) backupNamespaces(ctx context.Context) ([]types.ResourceWithContent, error) {
+	return m.backupResources(ctx, "", "Namespace",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		}, nil)
+}
+
+// Simple wrappers using generic function - replaces 40+ lines with 12 lines
 func (m *Manager) backupDeployments(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	deployments, err := m.k8sClient.GetDeployments(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	resources := make([]types.ResourceWithContent, 0, len(deployments.Items))
-	for _, deployment := range deployments.Items {
-		resource, err := m.convertToResourceWithContent(&deployment, namespace, "Deployment")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Deployment",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupServices(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	services, err := m.k8sClient.GetServices(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	resources := make([]types.ResourceWithContent, 0, len(services.Items))
-	for _, service := range services.Items {
-		resource, err := m.convertToResourceWithContent(&service, namespace, "Service")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Service",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupConfigMaps(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	configMaps, err := m.k8sClient.GetConfigMaps(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, cm := range configMaps.Items {
-		resource, err := m.convertToResourceWithContent(&cm, namespace, "ConfigMap")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "ConfigMap",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().ConfigMaps(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupSecrets(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	secrets, err := m.k8sClient.GetSecrets(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, secret := range secrets.Items {
-		// Skip service account tokens (they will be regenerated)
-		if secret.Type == "kubernetes.io/service-account-token" {
-			continue
-		}
-
-		resource, err := m.convertToResourceWithContent(&secret, namespace, "Secret")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Secret",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
+		},
+		func(obj interface{}) bool {
+			if secret, ok := obj.(*corev1.Secret); ok {
+				return secret.Type == "kubernetes.io/service-account-token"
+			}
+			return false
+		})
 }
 
 func (m *Manager) backupPersistentVolumeClaims(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	pvcs, err := m.k8sClient.GetPersistentVolumeClaims(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, pvc := range pvcs.Items {
-		resource, err := m.convertToResourceWithContent(&pvc, namespace, "PersistentVolumeClaim")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "PersistentVolumeClaim",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupPersistentVolumes(ctx context.Context) ([]types.ResourceWithContent, error) {
-	pvs, err := m.k8sClient.GetPersistentVolumes(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, pv := range pvs.Items {
-		resource, err := m.convertToResourceWithContent(&pv, "", "PersistentVolume")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, "", "PersistentVolume",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupServiceAccounts(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	serviceAccounts, err := m.k8sClient.GetServiceAccounts(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, sa := range serviceAccounts.Items {
-		// Skip default service account (it will be created automatically)
-		if sa.Name == "default" {
-			continue
-		}
-
-		resource, err := m.convertToResourceWithContent(&sa, namespace, "ServiceAccount")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "ServiceAccount",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().CoreV1().ServiceAccounts(namespace).List(ctx, metav1.ListOptions{})
+		},
+		func(obj interface{}) bool {
+			if sa, ok := obj.(*corev1.ServiceAccount); ok {
+				return sa.Name == "default"
+			}
+			return false
+		})
 }
 
 func (m *Manager) backupRoles(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	roles, err := m.k8sClient.GetRoles(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, role := range roles.Items {
-		resource, err := m.convertToResourceWithContent(&role, namespace, "Role")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Role",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().RbacV1().Roles(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupRoleBindings(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	roleBindings, err := m.k8sClient.GetRoleBindings(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, rb := range roleBindings.Items {
-		resource, err := m.convertToResourceWithContent(&rb, namespace, "RoleBinding")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "RoleBinding",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupClusterRoles(ctx context.Context) ([]types.ResourceWithContent, error) {
-	clusterRoles, err := m.k8sClient.GetClusterRoles(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, cr := range clusterRoles.Items {
-		// Skip system cluster roles
-		if strings.HasPrefix(cr.Name, "system:") {
-			continue
-		}
-
-		resource, err := m.convertToResourceWithContent(&cr, "", "ClusterRole")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, "", "ClusterRole",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().RbacV1().ClusterRoles().List(ctx, metav1.ListOptions{})
+		},
+		func(obj interface{}) bool {
+			if cr, ok := obj.(*rbacv1.ClusterRole); ok {
+				return strings.HasPrefix(cr.Name, "system:")
+			}
+			return false
+		})
 }
 
 func (m *Manager) backupClusterRoleBindings(ctx context.Context) ([]types.ResourceWithContent, error) {
-	clusterRoleBindings, err := m.k8sClient.GetClusterRoleBindings(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, crb := range clusterRoleBindings.Items {
-		// Skip system cluster role bindings
-		if strings.HasPrefix(crb.Name, "system:") {
-			continue
-		}
-
-		resource, err := m.convertToResourceWithContent(&crb, "", "ClusterRoleBinding")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, "", "ClusterRoleBinding",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+		},
+		func(obj interface{}) bool {
+			if crb, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return strings.HasPrefix(crb.Name, "system:")
+			}
+			return false
+		})
 }
 
 func (m *Manager) backupIngresses(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	ingresses, err := m.k8sClient.GetIngresses(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, ingress := range ingresses.Items {
-		resource, err := m.convertToResourceWithContent(&ingress, namespace, "Ingress")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Ingress",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupNetworkPolicies(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	networkPolicies, err := m.k8sClient.GetNetworkPolicies(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, np := range networkPolicies.Items {
-		resource, err := m.convertToResourceWithContent(&np, namespace, "NetworkPolicy")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "NetworkPolicy",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
+// All remaining functions simplified to one-liners using generic function
 func (m *Manager) backupStatefulSets(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	statefulSets, err := m.k8sClient.GetStatefulSets(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, sts := range statefulSets.Items {
-		resource, err := m.convertToResourceWithContent(&sts, namespace, "StatefulSet")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "StatefulSet",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupDaemonSets(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	daemonSets, err := m.k8sClient.GetDaemonSets(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, ds := range daemonSets.Items {
-		resource, err := m.convertToResourceWithContent(&ds, namespace, "DaemonSet")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "DaemonSet",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupJobs(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	jobs, err := m.k8sClient.GetJobs(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, job := range jobs.Items {
-		resource, err := m.convertToResourceWithContent(&job, namespace, "Job")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "Job",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupCronJobs(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	cronJobs, err := m.k8sClient.GetCronJobs(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, cj := range cronJobs.Items {
-		resource, err := m.convertToResourceWithContent(&cj, namespace, "CronJob")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "CronJob",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupStorageClasses(ctx context.Context) ([]types.ResourceWithContent, error) {
-	storageClasses, err := m.k8sClient.GetStorageClasses(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, sc := range storageClasses.Items {
-		resource, err := m.convertToResourceWithContent(&sc, "", "StorageClass")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, "", "StorageClass",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+		}, nil)
 }
 
 func (m *Manager) backupPodDisruptionBudgets(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
-	pdbs, err := m.k8sClient.GetPodDisruptionBudgets(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	var resources []types.ResourceWithContent
-	for _, pdb := range pdbs.Items {
-		resource, err := m.convertToResourceWithContent(&pdb, namespace, "PodDisruptionBudget")
-		if err != nil {
-			return nil, err
-		}
-		resources = append(resources, resource)
-	}
-
-	return resources, nil
+	return m.backupResources(ctx, namespace, "PodDisruptionBudget",
+		func() (interface{}, error) {
+			return m.k8sClient.Clientset().PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
+		}, nil)
 }
