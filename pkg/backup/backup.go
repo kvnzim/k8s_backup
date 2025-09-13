@@ -76,13 +76,7 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 	clusterResources, clusterErrors := m.backupClusterScopedResources(ctx, resourceTypesToBackup)
 	allResources = append(allResources, clusterResources...)
 	errors = append(errors, clusterErrors...)
-
-	// Update progress
-	progress.Completed = len(clusterResources)
-	progress.Current = fmt.Sprintf("Backed up %d cluster resources", len(clusterResources))
-	if progressCallback != nil {
-		progressCallback(progress)
-	}
+	m.updateProgress(&progress, len(clusterResources), fmt.Sprintf("Backed up %d cluster resources", len(clusterResources)), progressCallback)
 
 	// Backup namespaced resources
 	for _, ns := range namespacesToBackup {
@@ -93,13 +87,7 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 		nsResources, nsErrors := m.backupNamespacedResources(ctx, ns, resourceTypesToBackup)
 		allResources = append(allResources, nsResources...)
 		errors = append(errors, nsErrors...)
-
-		// Update progress
-		progress.Completed = len(allResources)
-		progress.Current = fmt.Sprintf("Backed up namespace: %s (%d resources)", ns, len(nsResources))
-		if progressCallback != nil {
-			progressCallback(progress)
-		}
+		m.updateProgress(&progress, len(allResources), fmt.Sprintf("Backed up namespace: %s (%d resources)", ns, len(nsResources)), progressCallback)
 	}
 
 	// Create backup metadata
@@ -117,10 +105,7 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 	}
 
 	// Save backup
-	progress.Current = "Saving backup files..."
-	if progressCallback != nil {
-		progressCallback(progress)
-	}
+	m.updateProgress(&progress, progress.Completed, "Saving backup files...", progressCallback)
 
 	err = m.storage.SaveBackup(ctx, metadata, allResources)
 	if err != nil {
@@ -128,10 +113,7 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 	}
 
 	// Final progress report
-	progress.Current = "Backup completed"
-	if progressCallback != nil {
-		progressCallback(progress)
-	}
+	m.updateProgress(&progress, progress.Completed, "Backup completed", progressCallback)
 
 	log.Printf("Backup completed: %s (%d resources)", metadata.Name, metadata.TotalResources)
 
@@ -142,40 +124,64 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 	return metadata, nil
 }
 
-// estimateResourceCount provides a rough estimate for memory pre-allocation
-func (m *Manager) estimateResourceCount(namespaceCount int, resourceTypes []string) int {
-	// Rough estimates based on typical cluster sizes
-	clusterScopedCount := 0
-	namespacedCount := 0
+// updateProgress centralizes progress update logic
+func (m *Manager) updateProgress(progress *types.Progress, completed int, message string, callback types.ProgressCallback) {
+	progress.Completed = completed
+	progress.Current = message
+	if callback != nil {
+		callback(*progress)
+	}
+}
 
+// estimateResourceCount provides memory pre-allocation estimates
+func (m *Manager) estimateResourceCount(namespaceCount int, resourceTypes []string) int {
+	estimates := map[string]int{
+		// Cluster-scoped resources
+		"namespaces":          namespaceCount + 10,
+		"clusterroles":        50,
+		"clusterrolebindings": 50,
+		"persistentvolumes":   20,
+		"storageclasses":      20,
+		// Namespaced resources (per namespace)
+		"deployments":            10,
+		"services":               10,
+		"configmaps":             20,
+		"secrets":                20,
+		"persistentvolumeclaims": 5,
+		"serviceaccounts":        5,
+		"roles":                  5,
+		"rolebindings":           5,
+		"ingresses":              5,
+		"networkpolicies":        5,
+		"statefulsets":           5,
+		"daemonsets":             5,
+		"jobs":                   5,
+		"cronjobs":               5,
+		"poddisruptionbudgets":   5,
+	}
+
+	total := 0
 	for _, rt := range resourceTypes {
-		if types.IsClusterScoped(rt) {
-			switch rt {
-			case "namespaces":
-				clusterScopedCount += namespaceCount + 10 // system namespaces
-			case "clusterroles", "clusterrolebindings":
-				clusterScopedCount += 50 // typical cluster roles
-			default:
-				clusterScopedCount += 20 // other cluster resources
+		if estimate, exists := estimates[rt]; exists {
+			if types.IsClusterScoped(rt) {
+				total += estimate
+			} else {
+				total += estimate * namespaceCount
 			}
 		} else {
-			// Estimate per namespace
-			switch rt {
-			case "deployments", "services":
-				namespacedCount += 10 // typical apps per namespace
-			case "configmaps", "secrets":
-				namespacedCount += 20 // more config resources
-			default:
-				namespacedCount += 5 // other resources
+			// Default estimate for unknown resources
+			if types.IsClusterScoped(rt) {
+				total += 10
+			} else {
+				total += 5 * namespaceCount
 			}
 		}
 	}
 
-	estimated := clusterScopedCount + (namespacedCount * namespaceCount)
-	if estimated < 100 {
-		return 100 // minimum allocation
+	if total < 100 {
+		return 100
 	}
-	return estimated
+	return total
 }
 
 // getNamespacesToBackup determines which namespaces to include in the backup
@@ -240,55 +246,29 @@ func (m *Manager) getResourceTypesToBackup(options *types.BackupOptions) []strin
 }
 
 func (m *Manager) backupClusterScopedResources(ctx context.Context, resourceTypes []string) ([]types.ResourceWithContent, []error) {
-	resources := make([]types.ResourceWithContent, 0, 100) // Pre-allocate
+	resources := make([]types.ResourceWithContent, 0, 100)
 	var errors []error
 
-	// Create a map for faster lookups
-	typeMap := make(map[string]bool, len(resourceTypes))
+	// Map resource types to their backup functions
+	clusterBackupFuncs := map[string]func(context.Context) ([]types.ResourceWithContent, error){
+		"namespaces":          m.backupNamespaces,
+		"persistentvolumes":   m.backupPersistentVolumes,
+		"clusterroles":        m.backupClusterRoles,
+		"clusterrolebindings": m.backupClusterRoleBindings,
+		"storageclasses":      m.backupStorageClasses,
+	}
+
 	for _, rt := range resourceTypes {
-		if types.IsClusterScoped(rt) {
-			typeMap[rt] = true
+		if !types.IsClusterScoped(rt) {
+			continue
 		}
-	}
 
-	// Process only requested cluster-scoped resource types
-	if typeMap["namespaces"] {
-		if res, err := m.backupNamespaces(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to backup namespaces: %w", err))
-		} else {
-			resources = append(resources, res...)
-		}
-	}
-
-	if typeMap["persistentvolumes"] {
-		if res, err := m.backupPersistentVolumes(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to backup persistent volumes: %w", err))
-		} else {
-			resources = append(resources, res...)
-		}
-	}
-
-	if typeMap["clusterroles"] {
-		if res, err := m.backupClusterRoles(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to backup cluster roles: %w", err))
-		} else {
-			resources = append(resources, res...)
-		}
-	}
-
-	if typeMap["clusterrolebindings"] {
-		if res, err := m.backupClusterRoleBindings(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to backup cluster role bindings: %w", err))
-		} else {
-			resources = append(resources, res...)
-		}
-	}
-
-	if typeMap["storageclasses"] {
-		if res, err := m.backupStorageClasses(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("failed to backup storage classes: %w", err))
-		} else {
-			resources = append(resources, res...)
+		if backupFunc, exists := clusterBackupFuncs[rt]; exists {
+			if res, err := backupFunc(ctx); err != nil {
+				errors = append(errors, fmt.Errorf("failed to backup %s: %w", rt, err))
+			} else {
+				resources = append(resources, res...)
+			}
 		}
 	}
 
@@ -296,11 +276,10 @@ func (m *Manager) backupClusterScopedResources(ctx context.Context, resourceType
 }
 
 func (m *Manager) backupNamespacedResources(ctx context.Context, namespace string, resourceTypes []string) ([]types.ResourceWithContent, []error) {
-	resources := make([]types.ResourceWithContent, 0, 50) // Pre-allocate
+	resources := make([]types.ResourceWithContent, 0, 50)
 	var errors []error
 
-	// Create backup function map for efficient lookups
-	backupFuncs := map[string]func(context.Context, string) ([]types.ResourceWithContent, error){
+	namespacedBackupFuncs := map[string]func(context.Context, string) ([]types.ResourceWithContent, error){
 		"deployments":            m.backupDeployments,
 		"services":               m.backupServices,
 		"configmaps":             m.backupConfigMaps,
@@ -318,13 +297,12 @@ func (m *Manager) backupNamespacedResources(ctx context.Context, namespace strin
 		"poddisruptionbudgets":   m.backupPodDisruptionBudgets,
 	}
 
-	// Process only requested namespaced resource types
 	for _, resourceType := range resourceTypes {
 		if types.IsClusterScoped(resourceType) {
 			continue
 		}
 
-		if backupFunc, exists := backupFuncs[resourceType]; exists {
+		if backupFunc, exists := namespacedBackupFuncs[resourceType]; exists {
 			if res, err := backupFunc(ctx, namespace); err != nil {
 				errors = append(errors, fmt.Errorf("failed to backup %s in %s: %w", resourceType, namespace, err))
 			} else {
@@ -385,9 +363,8 @@ type APIInfo struct {
 	APIVersion string
 }
 
-// getAPIInfo returns API information for a given resource kind
+// getAPIInfo returns API version information for Kubernetes resource kinds
 func (m *Manager) getAPIInfo(kind string) APIInfo {
-	// Define the mapping once, eliminating duplicate switch cases
 	resourceMap := map[string]APIInfo{
 		// Core resources (no group)
 		"Namespace":             {Group: "", Version: "v1", APIVersion: "v1"},
@@ -466,7 +443,7 @@ func (m *Manager) cleanObject(obj runtime.Object) {
 	}
 }
 
-// Generic backup function - eliminates 300+ lines of repetitive code
+// backupResources is a generic function for backing up any Kubernetes resource type
 func (m *Manager) backupResources(ctx context.Context, namespace, kind string, listFunc func() (interface{}, error), shouldSkip func(interface{}) bool) ([]types.ResourceWithContent, error) {
 	result, err := listFunc()
 	if err != nil {
@@ -498,7 +475,7 @@ func (m *Manager) backupResources(ctx context.Context, namespace, kind string, l
 	return resources, nil
 }
 
-// Namespace backup function (cluster-scoped)
+// Cluster-scoped resource backup functions
 func (m *Manager) backupNamespaces(ctx context.Context) ([]types.ResourceWithContent, error) {
 	return m.backupResources(ctx, "", "Namespace",
 		func() (interface{}, error) {
@@ -506,7 +483,7 @@ func (m *Manager) backupNamespaces(ctx context.Context) ([]types.ResourceWithCon
 		}, nil)
 }
 
-// Simple wrappers using generic function - replaces 40+ lines with 12 lines
+// Namespaced resource backup functions
 func (m *Manager) backupDeployments(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
 	return m.backupResources(ctx, namespace, "Deployment",
 		func() (interface{}, error) {
@@ -622,7 +599,6 @@ func (m *Manager) backupNetworkPolicies(ctx context.Context, namespace string) (
 		}, nil)
 }
 
-// All remaining functions simplified to one-liners using generic function
 func (m *Manager) backupStatefulSets(ctx context.Context, namespace string) ([]types.ResourceWithContent, error) {
 	return m.backupResources(ctx, namespace, "StatefulSet",
 		func() (interface{}, error) {
