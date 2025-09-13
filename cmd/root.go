@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -29,10 +28,6 @@ Features:
 - Restore from backup files with dependency ordering
 - List and manage existing backups
 - Comprehensive logging and error handling`,
-
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -50,10 +45,4 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "kubernetes namespace (default: all namespaces)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 
-	// Bind environment variables
-	if kubeconfig == "" {
-		if home := os.Getenv("HOME"); home != "" {
-			kubeconfig = fmt.Sprintf("%s/.kube/config", home)
-		}
-	}
 }

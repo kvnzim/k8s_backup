@@ -111,13 +111,14 @@ func runBackup(cmd *cobra.Command, args []string) {
 
 	// Progress callback
 	progressCallback := func(progress types.Progress) {
+		// Show progress every 10 items, when verbose, or when complete
 		if verbose || progress.Completed%10 == 0 || progress.Completed == progress.Total {
 			fmt.Printf("\rProgress: %d/%d - %s", progress.Completed, progress.Total, progress.Current)
 			if progress.Completed == progress.Total {
-				fmt.Println() // New line when complete
+				fmt.Println()
 			}
 		}
-
+		// Log any errors
 		for _, err := range progress.Errors {
 			log.Printf("Warning: %v", err)
 		}

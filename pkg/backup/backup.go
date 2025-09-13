@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -73,67 +72,33 @@ func (m *Manager) CreateBackup(ctx context.Context, options *types.BackupOptions
 		progressCallback(progress)
 	}
 
-	// Use channels for concurrent processing
-	resourceChan := make(chan []types.ResourceWithContent, len(namespacesToBackup)+1)
-	errorChan := make(chan []error, len(namespacesToBackup)+1)
-	var wg sync.WaitGroup
+	// Backup cluster-scoped resources first
+	clusterResources, clusterErrors := m.backupClusterScopedResources(ctx, resourceTypesToBackup)
+	allResources = append(allResources, clusterResources...)
+	errors = append(errors, clusterErrors...)
 
-	// Backup cluster-scoped resources concurrently
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		clusterResources, clusterErrors := m.backupClusterScopedResources(ctx, resourceTypesToBackup)
-		resourceChan <- clusterResources
-		errorChan <- clusterErrors
-	}()
-
-	// Backup namespaced resources concurrently
-	for _, ns := range namespacesToBackup {
-		wg.Add(1)
-		go func(namespace string) {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				return
-			}
-			nsResources, nsErrors := m.backupNamespacedResources(ctx, namespace, resourceTypesToBackup)
-			resourceChan <- nsResources
-			errorChan <- nsErrors
-		}(ns)
+	// Update progress
+	progress.Completed = len(clusterResources)
+	progress.Current = fmt.Sprintf("Backed up %d cluster resources", len(clusterResources))
+	if progressCallback != nil {
+		progressCallback(progress)
 	}
 
-	// Wait for all goroutines and close channels
-	go func() {
-		wg.Wait()
-		close(resourceChan)
-		close(errorChan)
-	}()
-
-	// Collect results
-	completed := 0
-	for {
-		select {
-		case resources, ok := <-resourceChan:
-			if !ok {
-				resourceChan = nil
-			} else {
-				allResources = append(allResources, resources...)
-				completed += len(resources)
-				progress.Completed = completed
-				progress.Current = fmt.Sprintf("Collected %d resources", completed)
-				if progressCallback != nil {
-					progressCallback(progress)
-				}
-			}
-		case errs, ok := <-errorChan:
-			if !ok {
-				errorChan = nil
-			} else {
-				errors = append(errors, errs...)
-			}
+	// Backup namespaced resources
+	for _, ns := range namespacesToBackup {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 
-		if resourceChan == nil && errorChan == nil {
-			break
+		nsResources, nsErrors := m.backupNamespacedResources(ctx, ns, resourceTypesToBackup)
+		allResources = append(allResources, nsResources...)
+		errors = append(errors, nsErrors...)
+
+		// Update progress
+		progress.Completed = len(allResources)
+		progress.Current = fmt.Sprintf("Backed up namespace: %s (%d resources)", ns, len(nsResources))
+		if progressCallback != nil {
+			progressCallback(progress)
 		}
 	}
 

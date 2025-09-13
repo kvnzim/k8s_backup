@@ -105,10 +105,10 @@ func runRestore(cmd *cobra.Command, args []string) {
 			log.Fatalf("No backups found in ./backups")
 		}
 
-		// Use the most recent backup
-		var latest *types.BackupMetadata
-		for _, backup := range backups {
-			if latest == nil || backup.Timestamp.After(latest.Timestamp) {
+		// Find the most recent backup
+		latest := backups[0]
+		for _, backup := range backups[1:] {
+			if backup.Timestamp.After(latest.Timestamp) {
 				latest = backup
 			}
 		}
@@ -145,13 +145,14 @@ func runRestore(cmd *cobra.Command, args []string) {
 
 	// Progress callback
 	progressCallback := func(progress types.Progress) {
+		// Show progress every 5 items, when verbose, or when complete
 		if verbose || progress.Completed%5 == 0 || progress.Completed == progress.Total {
 			fmt.Printf("\rProgress: %d/%d - %s", progress.Completed, progress.Total, progress.Current)
 			if progress.Completed == progress.Total {
-				fmt.Println() // New line when complete
+				fmt.Println()
 			}
 		}
-
+		// Log any errors
 		for _, err := range progress.Errors {
 			log.Printf("Warning: %v", err)
 		}
